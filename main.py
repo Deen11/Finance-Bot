@@ -222,14 +222,28 @@ def load_chat_id() -> Optional[int]:
 
 
 # ── Transactions ──────────────────────────────────────────────────────────────
-def log_transaction(amount: float, category: str, description: str, trans_type: str):
+def log_transaction(amount: float, category: str, description: str, trans_type: str, tx_date: Optional[str] = None):
     ws = get_worksheet()
-    now = datetime.now(SGT)  # Always log in Singapore Time
+    now = datetime.now(SGT)  # Always use SGT for the time
     signed = amount if trans_type == "income" else -amount
+
+    # Use extracted date from image if provided, otherwise today
+    if tx_date:
+        try:
+            parsed = datetime.strptime(tx_date, "%Y-%m-%d")
+            log_date = parsed.strftime("%Y-%m-%d")
+            log_month = parsed.strftime("%B %Y")
+        except ValueError:
+            log_date = now.strftime("%Y-%m-%d")
+            log_month = now.strftime("%B %Y")
+    else:
+        log_date = now.strftime("%Y-%m-%d")
+        log_month = now.strftime("%B %Y")
+
     ws.append_row([
-        now.strftime("%Y-%m-%d"),
+        log_date,
         now.strftime("%H:%M"),
-        now.strftime("%B %Y"),
+        log_month,
         trans_type.capitalize(),
         category,
         description,
@@ -700,7 +714,10 @@ In banking screenshots, the merchant name is often in the Description field.
 Card transactions often show merchant names like "UMC-S BurgerKing", "NTUC", "FAIRPRICE" etc.
 
 Extract the transaction and return ONLY valid JSON — no markdown, no backticks:
-{"amount": <positive number>, "category": "<category>", "description": "<3-5 word description>", "type": "<expense or income>"}
+{"amount": <positive number>, "category": "<category>", "description": "<3-5 word description>", "type": "<expense or income>", "date": "<YYYY-MM-DD if visible in image, else null>"}
+
+If there is a date visible in the image (e.g. "02 Jul", "01/07/2026", "Jul 2"), extract it and format as YYYY-MM-DD using the current year 2026 if no year is shown.
+If no date is visible, use null for the date field.
 
 Categories:
 - Food        → restaurants, fast food (McDonald's, Burger King, KFC), cafes, hawker, food delivery, supermarkets with food
@@ -747,18 +764,21 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        tx_date = result.get("date") if result else None
         log_transaction(
             normalized["amount"],
             normalized["category"],
             normalized["description"],
             normalized["type"],
+            tx_date=tx_date,
         )
 
         emoji = "💰" if normalized["type"] == "income" else "💸"
+        date_note = f" _(dated {tx_date})_" if tx_date else ""
         await msg.edit_text(
             f"{emoji} *Logged from image!*\n"
             f"{normalized['description'].title()} · `${normalized['amount']:.2f}`\n"
-            f"_{normalized['category']}_",
+            f"_{normalized['category']}_" + date_note,
             parse_mode="Markdown",
         )
 
