@@ -15,7 +15,7 @@ load_dotenv()
 import google.generativeai as genai
 import gspread
 from google.oauth2.service_account import Credentials
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -681,8 +681,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+
+async def post_init(application):
+    """Register bot commands so / shows the preview in Telegram."""
+    await application.bot.set_my_commands([
+        BotCommand("summary",         "📊 This month's full breakdown"),
+        BotCommand("today",           "📅 What you've logged today"),
+        BotCommand("budget",          "💳 How much you have left this month"),
+        BotCommand("history",         "📋 Last 10 transactions"),
+        BotCommand("undo",            "↩️ Delete the last entry"),
+        BotCommand("delete",          "🗑 Delete entry by number from /history"),
+        BotCommand("addrecurring",    "🔄 Add a recurring transaction"),
+        BotCommand("listrecurring",   "📋 View all recurring transactions"),
+        BotCommand("removerecurring", "🗑 Remove a recurring transaction"),
+        BotCommand("help",            "👋 Show all commands"),
+    ])
+    logger.info("Bot commands registered with Telegram")
+
+
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).build()
 
     # Command handlers
     app.add_handler(CommandHandler("start",            cmd_start))
