@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import re
 import calendar
 from datetime import datetime, date
 from typing import Optional
@@ -50,6 +51,14 @@ Categories (pick the best match):
 - Income      → salary, allowance, received money, earned money, ang bao
 - Other       → anything that doesn't fit above
 
+Example messages:
+- spent $12 on chicken rice
+- paid mom $800
+- bought earphones $35
+- salary $3000 received
+- Spotify $6.48
+- spent $5.98 on Apple Music
+
 Message: "{message}"
 
 Return ONLY valid JSON — no markdown, no backticks, no explanation:
@@ -59,19 +68,74 @@ If the message is not a financial transaction, return:
 {{"error": "not a transaction"}}"""
 
 
+def extract_json_payload(raw: str) -> Optional[str]:
+    raw = raw.strip()
+    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL | re.IGNORECASE)
+    if fence_match:
+        return fence_match.group(1)
+
+    brace_match = re.search(r"(\{(?:[^{}]|(?1))*\})", raw)
+    if brace_match:
+        return brace_match.group(1)
+
+    return None
+
+
+def simple_parse_transaction(text: str) -> Optional[dict]:
+    text = text.lower().strip()
+    amount_match = re.search(r"\$?([0-9]+(?:\.[0-9]+)?)", text)
+    if not amount_match:
+        return None
+
+    amount = float(amount_match.group(1))
+    trans_type = "expense"
+    if re.search(r"\b(salary|income|earned|received|paycheck|ang bao|angbao)\b", text):
+        trans_type = "income"
+
+    category = "Other"
+    if re.search(r"\b(food|lunch|dinner|breakfast|hawker|kopitiam|boba|kopi|snack|snacks|delivery)\b", text):
+        category = "Food"
+    elif re.search(r"\b(bus|mrt|grab|taxi|simplygo|ez-link|ezlink|transport|uber)\b", text):
+        category = "Transport"
+    elif re.search(r"\b(clothes|shoes|electronics|games|beauty|personal care|gadgets|gift|shopping|earphones|headphones|phone|watch)\b", text):
+        category = "Shopping"
+    elif re.search(r"\b(mom|mum|mother|parents|family|dad|father)\b", text):
+        category = "Family"
+    elif re.search(r"\b(savings|mari bank|maribank|transfer|deposit)\b", text):
+        category = "Savings"
+    elif re.search(r"\b(netflix|spotify|apple music|youtube premium|icloud|subscription|sub)\b", text):
+        category = "Subscriptions"
+    elif trans_type == "income":
+        category = "Income"
+
+    description = re.sub(r"\$?[0-9]+(?:\.[0-9]+)?", "", text)
+    description = re.sub(r"\b(spent|paid|bought|purchased|received|got|for|on|to)\b", "", description)
+    description = re.sub(r"[^a-z0-9 ]", "", description).strip()
+    description_words = [w for w in description.split() if w and w not in {"a", "the", "to", "on", "for"}]
+    description = " ".join(description_words[:5]) or category
+
+    return {
+        "amount": amount,
+        "category": category,
+        "description": description.title(),
+        "type": trans_type,
+    }
+
+
 async def parse_with_gemini(text: str) -> Optional[dict]:
     try:
         response = gemini.generate_content(PARSE_PROMPT.format(message=text))
         raw = response.text.strip()
-        # Strip markdown code fences if Gemini adds them
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
-        return json.loads(raw.strip())
+
+        payload = extract_json_payload(raw) or raw
+        return json.loads(payload.strip())
     except Exception as e:
         logger.error(f"Gemini parse error: {e}")
-        return None
+        return simple_parse_transaction(text)
 
 
 # ── Google Sheets ─────────────────────────────────────────────────────────────
@@ -95,6 +159,37 @@ def get_worksheet():
         ws.append_row(["Date", "Time", "Month", "Type", "Category", "Description", "Amount"])
 
     return ws
+
+
+def normalize_transaction(result: dict) -> Optional[dict]:
+    if not result:
+        return None
+
+    # Clean up values that Gemini may return with dollar signs or whitespace.
+    try:
+        amount = result.get("amount")
+        if isinstance(amount, str):
+            amount = amount.replace("$", "").replace(",", "").strip()
+        amount = float(amount)
+    except (TypeError, ValueError):
+        return None
+
+    category = str(result.get("category", "Other")).strip().title()
+    description = str(result.get("description", "")).strip()
+    trans_type = str(result.get("type", "expense")).strip().lower()
+
+    if trans_type not in {"expense", "income"}:
+        trans_type = "expense"
+
+    if not description:
+        description = category
+
+    return {
+        "amount": amount,
+        "category": category,
+        "description": description,
+        "type": trans_type,
+    }
 
 
 def log_transaction(amount: float, category: str, description: str, trans_type: str):
@@ -266,8 +361,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("⏳")
 
     result = await parse_with_gemini(text)
+    normalized = normalize_transaction(result)
 
-    if not result or "error" in result:
+    if not normalized or "error" in (result or {}):
         await msg.edit_text(
             "❓ Didn't catch that as a transaction.\nTry: *spent $12 on lunch*",
             parse_mode="Markdown",
@@ -276,16 +372,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         log_transaction(
-            float(result["amount"]),
-            result["category"],
-            result["description"],
-            result["type"],
+            normalized["amount"],
+            normalized["category"],
+            normalized["description"],
+            normalized["type"],
         )
-        emoji = "💰" if result["type"] == "income" else "💸"
+        emoji = "💰" if normalized["type"] == "income" else "💸"
         await msg.edit_text(
             f"{emoji} *Logged!*\n"
-            f"{result['description'].title()} · `${float(result['amount']):.2f}`\n"
-            f"_{result['category']}_",
+            f"{normalized['description'].title()} · `${normalized['amount']:.2f}`\n"
+            f"_{normalized['category']}_",
             parse_mode="Markdown",
         )
     except Exception as e:
