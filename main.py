@@ -47,6 +47,7 @@ genai.configure(api_key=GEMINI_API_KEY)
 gemini = genai.GenerativeModel("gemini-2.5-flash")
 
 PARSE_PROMPT = """You are a personal finance parser for a Singaporean user. Parse the message into JSON.
+Today's date is {today}.
 
 Categories (pick the best match):
 - Food        → meals, lunch, dinner, supper, breakfast, hawker, kopitiam, boba, kopi, drinks, snacks, food delivery
@@ -58,18 +59,22 @@ Categories (pick the best match):
 - Income      → salary, allowance, received money, earned money, ang bao
 - Other       → anything that doesn't fit above
 
+Date rules:
+- "yesterday" → the day before today
+- "on 3 jul", "on 4th july", "last monday" → resolve to YYYY-MM-DD
+- No date mentioned → null (will default to today)
+
 Example messages:
 - spent $12 on chicken rice
-- paid mom $800
-- bought earphones $35
+- yesterday paid mom $800
+- bought earphones $35 on 3 jul
 - salary $3000 received
 - Spotify $6.48
-- spent $5.98 on Apple Music
 
-Message: "{message}"
+Message: "{{message}}"
 
 Return ONLY valid JSON — no markdown, no backticks, no explanation:
-{{"amount": <positive number>, "category": "<category>", "description": "<3-5 word description>", "type": "<expense or income>"}}
+{{"amount": <positive number>, "category": "<category>", "description": "<3-5 word description>", "type": "<expense or income>", "date": "<YYYY-MM-DD or null>"}}
 
 If the message is not a financial transaction, return:
 {{"error": "not a transaction"}}"""
@@ -125,7 +130,10 @@ def simple_parse_transaction(text: str) -> Optional[dict]:
 
 async def parse_with_gemini(text: str) -> Optional[dict]:
     try:
-        response = gemini.generate_content(PARSE_PROMPT.format(message=text))
+        from zoneinfo import ZoneInfo
+        today_sgt = datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y-%m-%d (%A)")
+        prompt = PARSE_PROMPT.format(today=today_sgt).format(message=text)
+        response = gemini.generate_content(prompt)
         raw = response.text.strip()
         if raw.startswith("```"):
             raw = raw.split("```")[1]
@@ -675,17 +683,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
+        tx_date = result.get("date") if result else None
         log_transaction(
             normalized["amount"],
             normalized["category"],
             normalized["description"],
             normalized["type"],
+            tx_date=tx_date,
         )
         emoji = "💰" if normalized["type"] == "income" else "💸"
+        date_note = f" _(dated {tx_date})_" if tx_date else ""
         await msg.edit_text(
             f"{emoji} *Logged!*\n"
             f"{normalized['description'].title()} · `${normalized['amount']:.2f}`\n"
-            f"_{normalized['category']}_",
+            f"_{normalized['category']}_" + date_note,
             parse_mode="Markdown",
         )
         # Check budget alert after every expense
