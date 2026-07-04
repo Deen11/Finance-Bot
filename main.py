@@ -283,7 +283,7 @@ def fetch_monthly_summary(month_str: Optional[str] = None) -> dict:
 
 def fetch_today() -> list:
     ws = get_worksheet()
-    today_str = date.today().strftime("%Y-%m-%d")
+    today_str = datetime.now(SGT).strftime("%Y-%m-%d")
     return [r for r in ws.get_all_records() if r.get("Date") == today_str]
 
 
@@ -357,7 +357,7 @@ async def weekly_summary_job(context):
 async def daily_recurring_job(context):
     """Auto-logs recurring transactions on their scheduled day (midnight SGT = 4pm UTC)."""
     chat_id = load_chat_id()
-    today_day = date.today().day
+    today_day = datetime.now(SGT).day
     try:
         recurring = get_recurring_sheet().get_all_records()
     except Exception as e:
@@ -469,7 +469,7 @@ async def cmd_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         data = fetch_monthly_summary()
         remaining = MONTHLY_BUDGET - data["expenses"]
-        today_date = date.today()
+        today_date = datetime.now(SGT).date()
         last_day = calendar.monthrange(today_date.year, today_date.month)[1]
         days_left = last_day - today_date.day + 1
         pct = min((data["expenses"] / MONTHLY_BUDGET * 100) if MONTHLY_BUDGET > 0 else 0, 100)
