@@ -686,23 +686,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── OCR / Image handling ──────────────────────────────────────────────────────
 IMAGE_PROMPT = """You are a personal finance parser for a Singaporean user.
-Analyse this image — it may be a hawker receipt, supermarket bill, Grab receipt,
-PayNow confirmation, bank screenshot, or any payment-related photo.
+Analyse this image carefully. It may be ANY of these formats:
+- Banking app transaction detail screen (DBS, POSB, OCBC, UOB, PayLah, PayNow)
+- Credit/debit card transaction record
+- Hawker or restaurant receipt
+- Supermarket or retail receipt
+- Grab, Gojek or taxi receipt
+- Food delivery receipt (FoodPanda, GrabFood)
+- Any payment confirmation screen
+
+IMPORTANT: Look for any dollar amount (SGD, $, or just a number with decimals).
+In banking screenshots, the merchant name is often in the Description field.
+Card transactions often show merchant names like "UMC-S BurgerKing", "NTUC", "FAIRPRICE" etc.
 
 Extract the transaction and return ONLY valid JSON — no markdown, no backticks:
 {"amount": <positive number>, "category": "<category>", "description": "<3-5 word description>", "type": "<expense or income>"}
 
 Categories:
-- Food        → hawker receipts, restaurant bills, food delivery, cafe
-- Transport   → Grab/taxi receipts, EZ-Link top-up, bus/MRT
-- Shopping    → retail receipts, online order confirmations
+- Food        → restaurants, fast food (McDonald's, Burger King, KFC), cafes, hawker, food delivery, supermarkets with food
+- Transport   → Grab, Gojek, taxi, EZ-Link, SimplyGo, bus, MRT, petrol
+- Shopping    → retail, clothes, electronics, NTUC, FairPrice, Guardian, Watsons
 - Family      → transfers to family members
-- Savings     → bank transfers to savings account
-- Subscriptions → digital subscription receipts
-- Income      → salary slips, PayNow received, bank credits
+- Savings     → transfers to savings account, MariBank
+- Subscriptions → Netflix, Spotify, Apple, iCloud, digital subscriptions
+- Income      → salary credited, PayNow received, bank credits
 - Other       → anything else
 
-If you cannot find a clear transaction amount, return:
+Always try your best to extract an amount. Only return the error JSON if there is truly no financial information at all.
 {"error": "no transaction found"}"""
 
 
