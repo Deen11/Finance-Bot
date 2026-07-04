@@ -44,7 +44,7 @@ BUDGET_ALERT_PCT  = 80  # warn when this % of budget is spent
 
 # ── Gemini ────────────────────────────────────────────────────────────────────
 genai.configure(api_key=GEMINI_API_KEY)
-gemini = genai.GenerativeModel("gemini-2.0-flash")
+gemini = genai.GenerativeModel("gemini-2.5-flash")
 
 PARSE_PROMPT = """You are a personal finance parser for a Singaporean user. Parse the message into JSON.
 
