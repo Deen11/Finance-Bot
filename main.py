@@ -12,6 +12,9 @@ from typing import Optional
 from dotenv import load_dotenv
 load_dotenv()
 
+import io
+import base64
+from PIL import Image
 import google.generativeai as genai
 import gspread
 from google.oauth2.service_account import Credentials
@@ -680,6 +683,85 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("❌ Error saving. Try again.")
 
 
+
+# ── OCR / Image handling ──────────────────────────────────────────────────────
+IMAGE_PROMPT = """You are a personal finance parser for a Singaporean user.
+Analyse this image — it may be a hawker receipt, supermarket bill, Grab receipt,
+PayNow confirmation, bank screenshot, or any payment-related photo.
+
+Extract the transaction and return ONLY valid JSON — no markdown, no backticks:
+{"amount": <positive number>, "category": "<category>", "description": "<3-5 word description>", "type": "<expense or income>"}
+
+Categories:
+- Food        → hawker receipts, restaurant bills, food delivery, cafe
+- Transport   → Grab/taxi receipts, EZ-Link top-up, bus/MRT
+- Shopping    → retail receipts, online order confirmations
+- Family      → transfers to family members
+- Savings     → bank transfers to savings account
+- Subscriptions → digital subscription receipts
+- Income      → salary slips, PayNow received, bank credits
+- Other       → anything else
+
+If you cannot find a clear transaction amount, return:
+{"error": "no transaction found"}"""
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text("🔍 Reading image...")
+    try:
+        # Get highest resolution photo
+        photo = update.message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+        photo_bytes = await file.download_as_bytearray()
+
+        # Send to Gemini Vision
+        img = Image.open(io.BytesIO(bytes(photo_bytes)))
+        response = gemini.generate_content([img, IMAGE_PROMPT])
+        raw = response.text.strip()
+
+        # Strip markdown fences if present
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+
+        payload = extract_json_payload(raw) or raw
+        result = json.loads(payload.strip())
+        normalized = normalize_transaction(result)
+
+        if not normalized or "error" in result:
+            await msg.edit_text(
+                "❓ Couldn't find a transaction in that image.\n"
+                "Try a clearer photo of the receipt total, or type it manually.",
+                parse_mode="Markdown",
+            )
+            return
+
+        log_transaction(
+            normalized["amount"],
+            normalized["category"],
+            normalized["description"],
+            normalized["type"],
+        )
+
+        emoji = "💰" if normalized["type"] == "income" else "💸"
+        await msg.edit_text(
+            f"{emoji} *Logged from image!*\n"
+            f"{normalized['description'].title()} · `${normalized['amount']:.2f}`\n"
+            f"_{normalized['category']}_",
+            parse_mode="Markdown",
+        )
+
+        # Budget alert
+        if normalized["type"] == "expense":
+            summary = fetch_monthly_summary()
+            await maybe_send_budget_alert(update, summary["expenses"])
+
+    except Exception as e:
+        logger.error(f"Photo handler error: {e}")
+        await msg.edit_text("❌ Error reading image. Try a clearer photo or type the amount manually.")
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 async def post_init(application):
@@ -715,6 +797,7 @@ def main():
     app.add_handler(CommandHandler("listrecurring",    cmd_list_recurring))
     app.add_handler(CommandHandler("removerecurring",  cmd_remove_recurring))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     # Scheduled jobs
     jq = app.job_queue
