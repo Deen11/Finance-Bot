@@ -27,7 +27,13 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from transaction_rules import format_parse_prompt, infer_category, resolve_category
+from transaction_rules import (
+    extract_transaction_amount,
+    format_parse_prompt,
+    infer_category,
+    parse_positive_amount,
+    resolve_category,
+)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -100,18 +106,22 @@ def extract_json_payload(raw: str) -> Optional[str]:
 
 def simple_parse_transaction(text: str) -> Optional[dict]:
     text_lower = text.lower().strip()
-    amount_match = re.search(r"\$?([0-9]+(?:\.[0-9]+)?)", text_lower)
-    if not amount_match:
+    amount = extract_transaction_amount(text_lower)
+    if amount is None:
         return None
 
-    amount = float(amount_match.group(1))
     trans_type = "expense"
     if re.search(r"\b(salary|income|earned|received|paycheck|ang bao|angbao)\b", text_lower):
         trans_type = "income"
 
     category = infer_category(text_lower, trans_type)
 
-    desc = re.sub(r"\$?[0-9]+(?:\.[0-9]+)?", "", text_lower)
+    desc = re.sub(
+        r"(?:s\$\s*|sgd\s*|\$\s*)?[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:\s*sgd\b)?",
+        "",
+        text_lower,
+        flags=re.I,
+    )
     desc = re.sub(
         r"\b(log|record|add|spent|paid|bought|purchased|received|got|for|on|to|under|category|as)\b",
         "",
@@ -146,11 +156,10 @@ def normalize_transaction(result: dict, source_text: Optional[str] = None) -> Op
     if not result:
         return None
     try:
-        amount = result.get("amount")
-        if isinstance(amount, str):
-            amount = amount.replace("$", "").replace(",", "").strip()
-        amount = float(amount)
-    except (TypeError, ValueError):
+        amount = parse_positive_amount(result.get("amount"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if amount is None:
         return None
 
     trans_type  = str(result.get("type", "expense")).strip().lower()
@@ -276,6 +285,11 @@ def load_chat_id() -> Optional[int]:
 
 # ── Transactions ──────────────────────────────────────────────────────────────
 def log_transaction(amount: float, category: str, description: str, trans_type: str, tx_date: Optional[str] = None):
+    validated_amount = parse_positive_amount(amount)
+    if validated_amount is None:
+        raise ValueError("Transaction amount must be finite and greater than zero")
+    amount = validated_amount
+
     ws = get_worksheet()
     now = datetime.now(SGT)  # Always use SGT for the time
     signed = amount if trans_type == "income" else -amount
@@ -628,8 +642,12 @@ async def cmd_add_recurring(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Last arg is day, second-to-last is amount, rest is description
         day = int(context.args[-1])
-        amount = float(context.args[-2])
+        amount = parse_positive_amount(context.args[-2])
         description = " ".join(context.args[:-2]).title()
+
+        if amount is None:
+            await msg.edit_text("❌ Amount must be a number greater than zero.")
+            return
 
         if not 1 <= day <= 31:
             await msg.edit_text("❌ Day must be between 1 and 31.")

@@ -1,5 +1,6 @@
 """Deterministic rules used when the AI parser needs a safety net."""
 
+import math
 import re
 from typing import Optional
 
@@ -14,6 +15,20 @@ VALID_CATEGORIES = {
     "Income",
     "Other",
 }
+
+_AMOUNT_NUMBER = r"[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
+_PREFIXED_AMOUNT_RE = re.compile(
+    rf"(?:S\$|SGD|\$)\s*(?P<amount>{_AMOUNT_NUMBER})",
+    re.I,
+)
+_SUFFIXED_AMOUNT_RE = re.compile(
+    rf"(?P<amount>{_AMOUNT_NUMBER})\s*SGD\b",
+    re.I,
+)
+_BARE_AMOUNT_RE = re.compile(
+    rf"(?<![\w.])(?P<amount>{_AMOUNT_NUMBER})(?![\w.])",
+    re.I,
+)
 
 _EXPLICIT_CATEGORY_PATTERNS = {
     "Food": r"\b(?:under|as|category|categorise(?:d)?\s+as|categorize(?:d)?\s+as)\s+(?:the\s+)?food\b",
@@ -53,6 +68,40 @@ _BEVERAGE_RE = re.compile(
     re.I,
 )
 _NON_FOOD_WATER_RE = re.compile(r"\b(?:water\s+bill|utilities?)\b", re.I)
+
+
+def parse_positive_amount(value: object) -> Optional[float]:
+    """Return a finite positive amount, or ``None`` for unsafe values."""
+    if isinstance(value, bool) or value is None:
+        return None
+
+    if isinstance(value, str):
+        cleaned = value.strip()
+        cleaned = re.sub(r"^(?:S\$|SGD|\$)\s*", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s*SGD$", "", cleaned, flags=re.I)
+        cleaned = cleaned.replace(",", "").strip()
+    else:
+        cleaned = value
+
+    try:
+        amount = float(cleaned)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+    if not math.isfinite(amount) or amount <= 0:
+        return None
+    return amount
+
+
+def extract_transaction_amount(text: str) -> Optional[float]:
+    """Extract an amount, prioritizing explicit SGD/currency notation."""
+    for pattern in (_PREFIXED_AMOUNT_RE, _SUFFIXED_AMOUNT_RE, _BARE_AMOUNT_RE):
+        match = pattern.search(text)
+        if match:
+            # If the selected monetary token is invalid (for example "$-5"),
+            # reject the message instead of silently turning it into a positive value.
+            return parse_positive_amount(match.group("amount"))
+    return None
 
 
 def explicit_category(text: str) -> Optional[str]:
