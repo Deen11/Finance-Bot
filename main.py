@@ -26,6 +26,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+from transaction_rules import format_parse_prompt, infer_category, resolve_category
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -49,8 +50,8 @@ gemini = genai.GenerativeModel("gemini-2.5-flash")
 PARSE_PROMPT = """You are a personal finance parser for a Singaporean user. Parse the message into JSON.
 Today's date is {today}.
 
-Categories (pick the best match):
-- Food        → meals, lunch, dinner, supper, breakfast, hawker, kopitiam, boba, kopi, drinks, snacks, food delivery
+Categories (pick exactly one):
+- Food        → anything eaten or drunk: meals, hawker food, snacks, groceries, coffee, tea, juice, plain water, vitamin water, and other beverages
 - Transport   → bus, MRT, Grab, taxi, SimplyGo, EZ-Link top-up
 - Shopping    → clothes, shoes, electronics, games, personal care, gadgets, random purchases
 - Family      → anything sent to mom / mum / mother / parents
@@ -70,8 +71,12 @@ Example messages:
 - bought earphones $35 on 3 jul
 - salary $3000 received
 - Spotify $6.48
+- 1.50 for water → Food
+- $3.50 vitamin c water → Food
 
-Message: "{{message}}"
+A consumable drink is Food, not Other. A water utility bill or a water bottle purchase is not Food.
+
+Message: "{message}"
 
 Return ONLY valid JSON — no markdown, no backticks, no explanation:
 {{"amount": <positive number>, "category": "<category>", "description": "<3-5 word description>", "type": "<expense or income>", "date": "<YYYY-MM-DD or null>"}}
@@ -103,24 +108,14 @@ def simple_parse_transaction(text: str) -> Optional[dict]:
     if re.search(r"\b(salary|income|earned|received|paycheck|ang bao|angbao)\b", text_lower):
         trans_type = "income"
 
-    category = "Other"
-    if re.search(r"\b(food|lunch|dinner|breakfast|supper|hawker|kopitiam|boba|kopi|snack|snacks|delivery|mcdonald|mcdonalds|starbucks)\b", text_lower):
-        category = "Food"
-    elif re.search(r"\b(bus|mrt|grab|taxi|simplygo|ez.?link|transport|uber)\b", text_lower):
-        category = "Transport"
-    elif re.search(r"\b(clothes|shoes|electronics|games|beauty|gadgets|gift|shopping|earphones|headphones|phone|watch|ipad|laptop)\b", text_lower):
-        category = "Shopping"
-    elif re.search(r"\b(mom|mum|mother|parents|family|dad|father)\b", text_lower):
-        category = "Family"
-    elif re.search(r"\b(savings|maribank|mari bank|transfer|deposit)\b", text_lower):
-        category = "Savings"
-    elif re.search(r"\b(netflix|spotify|apple music|youtube|icloud|subscription|sub|prime)\b", text_lower):
-        category = "Subscriptions"
-    elif trans_type == "income":
-        category = "Income"
+    category = infer_category(text_lower, trans_type)
 
     desc = re.sub(r"\$?[0-9]+(?:\.[0-9]+)?", "", text_lower)
-    desc = re.sub(r"\b(spent|paid|bought|purchased|received|got|for|on|to)\b", "", desc)
+    desc = re.sub(
+        r"\b(log|record|add|spent|paid|bought|purchased|received|got|for|on|to|under|category|as)\b",
+        "",
+        desc,
+    )
     desc = re.sub(r"[^a-z0-9 ]", "", desc).strip()
     words = [w for w in desc.split() if w and w not in {"a", "the", "to", "on", "for", "i"}]
     desc = " ".join(words[:5]) or category
@@ -132,7 +127,7 @@ async def parse_with_gemini(text: str) -> Optional[dict]:
     try:
         from zoneinfo import ZoneInfo
         today_sgt = datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y-%m-%d (%A)")
-        prompt = PARSE_PROMPT.format(today=today_sgt).format(message=text)
+        prompt = format_parse_prompt(PARSE_PROMPT, today=today_sgt, message=text)
         response = gemini.generate_content(prompt)
         raw = response.text.strip()
         if raw.startswith("```"):
@@ -146,7 +141,7 @@ async def parse_with_gemini(text: str) -> Optional[dict]:
         return simple_parse_transaction(text)
 
 
-def normalize_transaction(result: dict) -> Optional[dict]:
+def normalize_transaction(result: dict, source_text: Optional[str] = None) -> Optional[dict]:
     if not result:
         return None
     try:
@@ -157,11 +152,18 @@ def normalize_transaction(result: dict) -> Optional[dict]:
     except (TypeError, ValueError):
         return None
 
-    category  = str(result.get("category", "Other")).strip().title()
-    description = str(result.get("description", "")).strip() or category
     trans_type  = str(result.get("type", "expense")).strip().lower()
     if trans_type not in {"expense", "income"}:
         trans_type = "expense"
+
+    description = str(result.get("description", "")).strip()
+    category = resolve_category(
+        result.get("category", "Other"),
+        source_text=source_text or "",
+        description=description,
+        trans_type=trans_type,
+    )
+    description = description or category
 
     return {"amount": amount, "category": category, "description": description, "type": trans_type}
 
@@ -673,7 +675,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("⏳")
 
     result = await parse_with_gemini(text)
-    normalized = normalize_transaction(result)
+    normalized = normalize_transaction(result, source_text=text)
 
     if not normalized or "error" in (result or {}):
         await msg.edit_text(
