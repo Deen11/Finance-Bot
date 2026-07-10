@@ -19,6 +19,7 @@ import google.generativeai as genai
 import gspread
 from google.oauth2.service_account import Credentials
 from telegram import Update, BotCommand
+from telegram.helpers import escape_markdown
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -166,6 +167,48 @@ def normalize_transaction(result: dict, source_text: Optional[str] = None) -> Op
     description = description or category
 
     return {"amount": amount, "category": category, "description": description, "type": trans_type}
+
+
+async def show_saved_confirmation(
+    msg,
+    transaction: dict,
+    tx_date: Optional[str] = None,
+    from_image: bool = False,
+):
+    """Confirm an already-saved transaction without reporting a false save failure."""
+    emoji = "💰" if transaction["type"] == "income" else "💸"
+    heading = "Logged from image!" if from_image else "Logged!"
+    description = escape_markdown(str(transaction["description"]).title(), version=1)
+    category = escape_markdown(str(transaction["category"]), version=1)
+    date_note = (
+        f" _(dated {escape_markdown(str(tx_date), version=1)})_"
+        if tx_date
+        else ""
+    )
+
+    try:
+        await msg.edit_text(
+            f"{emoji} *{heading}*\n"
+            f"{description} · `${transaction['amount']:.2f}`\n"
+            f"_{category}_" + date_note,
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        logger.error(f"Confirmation error after transaction was saved: {e}")
+        # Plain text has no Markdown parsing risk. If Telegram itself is unavailable,
+        # keep the saved row and log the delivery failure without claiming save failed.
+        try:
+            await msg.edit_text(
+                f"{emoji} {heading}\n"
+                f"{transaction['description'].title()} · ${transaction['amount']:.2f}\n"
+                f"{transaction['category']}"
+                + (f" (dated {tx_date})" if tx_date else "")
+            )
+        except Exception as fallback_error:
+            logger.error(
+                "Plain-text confirmation also failed after transaction was saved: "
+                f"{fallback_error}"
+            )
 
 
 # ── Google Sheets helpers ─────────────────────────────────────────────────────
@@ -684,8 +727,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    tx_date = result.get("date") if result else None
     try:
-        tx_date = result.get("date") if result else None
         log_transaction(
             normalized["amount"],
             normalized["category"],
@@ -693,21 +736,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             normalized["type"],
             tx_date=tx_date,
         )
-        emoji = "💰" if normalized["type"] == "income" else "💸"
-        date_note = f" _(dated {tx_date})_" if tx_date else ""
+    except Exception as e:
+        logger.error(f"Transaction save error: {e}")
         await msg.edit_text(
-            f"{emoji} *Logged!*\n"
-            f"{normalized['description'].title()} · `${normalized['amount']:.2f}`\n"
-            f"_{normalized['category']}_" + date_note,
-            parse_mode="Markdown",
+            "❌ I couldn't confirm the Google Sheets save. "
+            "Check /history before retrying to avoid a duplicate."
         )
-        # Check budget alert after every expense
-        if normalized["type"] == "expense":
+        return
+
+    await show_saved_confirmation(msg, normalized, tx_date=tx_date)
+
+    # A budget-alert failure must not make a saved transaction look unsuccessful.
+    if normalized["type"] == "expense":
+        try:
             summary = fetch_monthly_summary()
             await maybe_send_budget_alert(update, summary["expenses"])
-    except Exception as e:
-        logger.error(f"Log error: {e}")
-        await msg.edit_text("❌ Error saving. Try again.")
+        except Exception as e:
+            logger.error(f"Post-save budget alert error: {e}")
 
 
 
@@ -777,7 +822,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        tx_date = result.get("date") if result else None
+    except Exception as e:
+        logger.error(f"Photo handler error: {e}")
+        await msg.edit_text("❌ Error reading image. Try a clearer photo or type the amount manually.")
+        return
+
+    tx_date = result.get("date") if result else None
+    try:
         log_transaction(
             normalized["amount"],
             normalized["category"],
@@ -785,24 +836,27 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             normalized["type"],
             tx_date=tx_date,
         )
-
-        emoji = "💰" if normalized["type"] == "income" else "💸"
-        date_note = f" _(dated {tx_date})_" if tx_date else ""
+    except Exception as e:
+        logger.error(f"Image transaction save error: {e}")
         await msg.edit_text(
-            f"{emoji} *Logged from image!*\n"
-            f"{normalized['description'].title()} · `${normalized['amount']:.2f}`\n"
-            f"_{normalized['category']}_" + date_note,
-            parse_mode="Markdown",
+            "❌ I couldn't confirm the Google Sheets save. "
+            "Check /history before retrying to avoid a duplicate."
         )
+        return
 
-        # Budget alert
-        if normalized["type"] == "expense":
+    await show_saved_confirmation(
+        msg,
+        normalized,
+        tx_date=tx_date,
+        from_image=True,
+    )
+
+    if normalized["type"] == "expense":
+        try:
             summary = fetch_monthly_summary()
             await maybe_send_budget_alert(update, summary["expenses"])
-
-    except Exception as e:
-        logger.error(f"Photo handler error: {e}")
-        await msg.edit_text("❌ Error reading image. Try a clearer photo or type the amount manually.")
+        except Exception as e:
+            logger.error(f"Post-save image budget alert error: {e}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
